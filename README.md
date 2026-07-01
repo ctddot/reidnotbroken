@@ -1,5 +1,6 @@
 # ReidCLI
 
+
 Terminal-native personal intelligence and coding CLI with an agent-first runtime.
 
 A real runtime — not a chat wrapper. Sessions, tasks, tools, policy gates, and
