@@ -7,9 +7,7 @@ syntax highlighting; tool calls hang under a bullet with their result.
 """
 from __future__ import annotations
 
-import random
 import sys
-import time
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -22,8 +20,7 @@ for _stream in (sys.stdout, sys.stderr):
     except (AttributeError, ValueError):
         pass
 
-from rich.console import Console, Group
-from rich.live import Live
+from rich.console import Console
 from rich.markdown import Markdown
 from rich.panel import Panel
 from rich.table import Table
@@ -52,12 +49,18 @@ from reidcli.ui.theme import (
     SUCCESS,
     TREE,
     WARN,
+    context_window_for,
+    fmt_tokens,
+    short_path,
 )
 
 console = Console()
 
 
-# --- Thinking spinner (Claude-Code-style: "✻ Gerund… (12s · ↑ 2.1k tokens)") ---
+# --- Thinking spinner constants (Claude-Code-style: "✻ Gerund… (12s · ↑ 2.1k tokens)") ---
+# Rendered natively by ui.app's persistent footer (prompt_toolkit), not Rich —
+# the spinner ticks too often (~8Hz) to round-trip through the console-capture
+# bridge each frame. These constants are shared so both look the same.
 
 _GERUNDS = [
     "Flibbertigibbeting", "Cogitating", "Percolating", "Ruminating", "Noodling",
@@ -69,81 +72,7 @@ _GERUNDS = [
 ]
 
 
-def _fmt_tokens(n: int) -> str:
-    return f"{n / 1000:.1f}k" if n >= 1000 else str(n)
-
-
 _STAR_FRAMES = "✶✸✹✺✹✷"
-
-
-class _ThinkingBox:
-    """Live renderable: a spinner line above the (empty) chat bar.
-
-    Kept pinned at the bottom by a Rich Live while the turn runs; the agent's
-    output prints above it. The chat bar stays a clean empty input box — the
-    `✻ Gerund… (12s · ↑ 2.1k tokens)` line sits ABOVE it (Claude-Code layout),
-    animating on every refresh. A status line sits beneath the box.
-    """
-
-    def __init__(self, token_estimator=None, status_fn=None, swap_every: float = 8.0) -> None:  # type: ignore[no-untyped-def]
-        self._tok = token_estimator
-        self._status_fn = status_fn
-        self._start = time.monotonic()
-        self._gerund = random.choice(_GERUNDS)
-        self._last_swap = self._start
-        self._swap_every = swap_every
-
-    def __rich__(self):  # type: ignore[no-untyped-def]
-        now = time.monotonic()
-        if now - self._last_swap > self._swap_every:
-            self._gerund = random.choice(_GERUNDS)
-            self._last_swap = now
-        elapsed = int(now - self._start)
-        star = _STAR_FRAMES[int(now * 6) % len(_STAR_FRAMES)]
-        # Spinner line — sits ABOVE the box, not inside it.
-        spinner = Text.assemble(
-            (f"{star} ", PRIMARY),
-            (f"{self._gerund}… ", PRIMARY),
-            (f"({elapsed}s", DIM),
-        )
-        if self._tok is not None:
-            try:
-                spinner.append(f" · ↑ {_fmt_tokens(self._tok())} tokens", style=DIM)
-            except Exception:  # noqa: BLE001 - cosmetic; never break the turn
-                pass
-        spinner.append(")", style=DIM)
-        # The chat bar itself stays an empty input box (full width, rounded red).
-        box = Panel(Text("› ", style=f"bold {PRIMARY}"), box=BOX, border_style=PRIMARY, padding=(0, 1))
-        parts: list = [spinner, box]
-        if self._status_fn is not None:
-            mode, model, tasks = self._status_fn()
-            mode_color = MODE_STYLE.get(mode, DIM)
-            sep = ("  ·  ", DIM)
-            parts.append(
-                Text.assemble(
-                    (f"  {APP_NAME}", f"bold {PRIMARY}"), sep,
-                    (mode, f"bold {mode_color}"), sep,
-                    (model, DIM), sep,
-                    (f"{tasks} tasks", WARN if tasks else DIM),
-                )
-            )
-        return Group(*parts)
-
-
-def thinking_box(token_estimator=None, status_fn=None):  # type: ignore[no-untyped-def]
-    """A Rich Live showing the input box in a 'working' state, pinned at bottom.
-
-    Output printed on `console` while it's active appears above the box. The
-    returned Live is a context manager; hold a reference so an approval prompt
-    can .stop()/.start() it around interactive input. Transient: the box is
-    erased when the turn ends so the interactive input bar can take over.
-    """
-    return Live(
-        _ThinkingBox(token_estimator, status_fn),
-        console=console,
-        refresh_per_second=8,
-        transient=True,
-    )
 
 
 def _bullet_grid(marker: Text, body) -> Table:  # type: ignore[no-untyped-def]
@@ -176,19 +105,48 @@ def banner() -> None:
     console.print(Panel(body, box=BOX, border_style=PRIMARY, padding=(0, 1), width=MAX_WIDTH))
 
 
-def status_bar(session: Session | None, mode: PermissionMode, task_count: int = 0) -> None:
+def status_line_text(status: dict) -> Text:
+    """Build the full status line: app · mode · model · effort · tokens · cwd · tasks."""
+    mode = status.get("mode", "—")
+    model = status.get("model", "—")
+    effort = status.get("effort", "—")
+    used = status.get("tokens_used", 0)
+    window = status.get("context_window", 0)
+    workspace = status.get("workspace", "—")
+    tasks = status.get("tasks", 0)
+
+    mode_color = MODE_STYLE.get(mode, DIM)
+    sep = ("  ·  ", DIM)
+    pct = f"{(used / window * 100):.0f}%" if window else "—"
+    usage = f"{fmt_tokens(used)}/{fmt_tokens(window)} ({pct})" if window else fmt_tokens(used)
+
+    return Text.assemble(
+        (f"  {APP_NAME}", f"bold {PRIMARY}"), sep,
+        (mode, f"bold {mode_color}"), sep,
+        (model, DIM), sep,
+        (f"effort:{effort}", DIM), sep,
+        (usage, DIM), sep,
+        (short_path(workspace), DIM), sep,
+        (f"{tasks} tasks", WARN if tasks else DIM),
+    )
+
+
+def status_bar(session: Session | None, mode: PermissionMode, task_count: int = 0, tokens_used: int = 0) -> None:
     """Low-noise status line, Claude-Code-style — dim, dotted, no box."""
     if session is None:
         console.print(Text("  no active session", style=DIM))
         return
-    mode_color = MODE_STYLE.get(mode.value, DIM)
-    sep = ("  ·  ", DIM)
     console.print(
-        Text.assemble(
-            (f"  {APP_NAME}", f"bold {PRIMARY}"), sep,
-            (mode.value, f"bold {mode_color}"), sep,
-            (session.model, DIM), sep,
-            (f"{task_count} tasks", WARN if task_count else DIM),
+        status_line_text(
+            {
+                "mode": mode.value,
+                "model": session.model,
+                "effort": session.reasoning_effort,
+                "tokens_used": tokens_used,
+                "context_window": context_window_for(session.model),
+                "workspace": str(session.workspace),
+                "tasks": task_count,
+            }
         )
     )
 
@@ -199,8 +157,13 @@ def status_prompt(session: Session | None, mode: PermissionMode | None) -> Text:
 
 
 def print_user(text: str) -> None:
-    """Echo the submitted prompt after the input box collapses."""
+    """Echo the submitted prompt after the input box collapses, under a small
+    "User" label, with blank lines before/after to separate it from whatever
+    came before (the prior reply) and after (this turn's reply)."""
+    console.print()
+    console.print(Text("  User", style=DIM))
     console.print(Text.assemble((f"{PROMPT} ", f"bold {PRIMARY}"), (text, "bold")))
+    console.print()
 
 
 def print_thinking(text: str) -> None:

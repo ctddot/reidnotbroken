@@ -9,6 +9,8 @@ All UI modules should pull colors + glyphs from here so the look stays consisten
 """
 from __future__ import annotations
 
+from pathlib import Path
+
 from rich import box
 from rich.text import Text
 
@@ -79,6 +81,37 @@ MODE_STYLE = {
 
 # Visual constants.
 MAX_WIDTH = 80  # constrain panels/tables so they don't span ultra-wide terminals
+
+# Known context-window sizes (tokens) by model prefix, for the status bar's
+# usage readout. Falls back to DEFAULT_CONTEXT_WINDOW for unrecognized models.
+DEFAULT_CONTEXT_WINDOW = 128_000
+CONTEXT_WINDOWS = {
+    "stub": 32_000,
+    "gpt-5": 400_000,
+    "gpt-4": 128_000,
+    "claude": 200_000,
+    "o1": 200_000,
+    "o3": 200_000,
+}
+
+
+def context_window_for(model: str) -> int:
+    for prefix, size in CONTEXT_WINDOWS.items():
+        if model.startswith(prefix):
+            return size
+    return DEFAULT_CONTEXT_WINDOW
+
+
+def fmt_tokens(n: int) -> str:
+    return f"{n / 1000:.1f}k" if n >= 1000 else str(n)
+
+
+def short_path(path: str, keep: int = 2) -> str:
+    """Collapse a long workspace path to its last `keep` components."""
+    parts = Path(path).parts
+    if len(parts) <= keep:
+        return path
+    return str(Path(*parts[-keep:]))
 
 
 def badge(text: str, color: str) -> Text:

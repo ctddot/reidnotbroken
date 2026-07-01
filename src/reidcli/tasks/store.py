@@ -20,8 +20,12 @@ class TaskStore:
             return {}
         import json
 
+        text = self.path.read_text(encoding="utf-8").strip()
+        if not text:
+            return {}
+
         data: dict[str, Task] = {}
-        for raw in json.loads(self.path.read_text(encoding="utf-8")).get("tasks", []):
+        for raw in json.loads(text).get("tasks", []):
             t = Task.model_validate(raw)
             data[t.id] = t
         return data

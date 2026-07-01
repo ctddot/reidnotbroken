@@ -34,10 +34,13 @@ _HELP_TASK = """\
 _HELP_CONFIG = """\
 [bold]Config & Policy[/]
   /model <name>      set model for the session
+  /effort <level>    set reasoning effort (low|medium|high)
   /mode <mode>       set permission mode (strict|balanced|autonomous|custom)
   /permissions       show current policy + gates
   /tools             list registered tools with risk levels
 """
+
+_EFFORT_LEVELS = ("low", "medium", "high")
 
 _HELP_META = f"""\
 [bold]Meta[/]
@@ -75,10 +78,12 @@ def handle(orchestrator: Orchestrator, line: str) -> str:
         render.console.print(HELP)
     elif cmd == "status":
         if orchestrator.state:
+            chars = sum(len(m.content or "") for m in orchestrator.state.messages)
             render.status_bar(
                 orchestrator.state.session,
                 orchestrator.state.effective_mode,
                 len(orchestrator.list_tasks()),
+                tokens_used=max(1, chars // 4),
             )
         else:
             render.print_info("no active session")
@@ -112,6 +117,17 @@ def handle(orchestrator: Orchestrator, line: str) -> str:
             orchestrator.state.session.model = arg
             orchestrator.session_store.update(orchestrator.state.session)
             render.print_info(f"model → {arg}")
+    elif cmd == "effort":
+        if orchestrator.state is None:
+            render.print_error("usage: /effort <low|medium|high> (with an active session)")
+        elif not arg:
+            render.print_info(f"current effort: {orchestrator.state.session.reasoning_effort}")
+        elif arg not in _EFFORT_LEVELS:
+            render.print_error(f"unknown effort: {arg} (try low|medium|high)")
+        else:
+            orchestrator.state.session.reasoning_effort = arg
+            orchestrator.session_store.update(orchestrator.state.session)
+            render.print_info(f"effort → {arg}")
     elif cmd == "mode":
         if not arg:
             render.print_info(f"current mode: {orchestrator.policy.mode.value}")

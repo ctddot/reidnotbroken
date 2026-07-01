@@ -101,6 +101,7 @@ or just start talking. The stub provider is offline and exercisable without API 
 | Command | Purpose |
 |---|---|
 | `/model <name>` | Set the model for the session |
+| `/effort <level>` | Set reasoning effort: `low` `medium` `high` |
 | `/mode <mode>` | Set permission mode: `strict` `balanced` `autonomous` `custom` |
 | `/permissions` | Show current policy: mode, blocked/allowed commands, writable roots, timeouts |
 | `/tools` | List registered tools with risk-level badges |
