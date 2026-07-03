@@ -51,6 +51,8 @@ class Orchestrator:
         self.agent = Agent(provider, tools, self.policy, context_extras={"orchestrator": self})
         self.state: RuntimeState | None = None
         self.nyx_enabled = False
+        self._task_store_cache: TaskStore | None = None
+        self._task_count_cache = 0
 
     def use_provider(self, name: str) -> BaseProvider:
         """Session-scoped provider swap. Rebuilds the Agent so subsequent turns
@@ -89,12 +91,18 @@ class Orchestrator:
         )
         self.session_store.create(session)
         self.state = RuntimeState(session=session)
+        self._task_store_cache = None
+        self._task_count_cache = 0
         self.session_store.event_log(session.id).write("session_start", {"title": session.title})
         return session
 
     def _default_model(self) -> str:
         prov = self.config.providers.get(self.config.default_provider)
-        return prov.default_model if prov else "stub-v0"
+        if prov and prov.default_model:
+            return prov.default_model
+        if getattr(self.provider, "default_model", ""):
+            return self.provider.default_model
+        return "stub-v0"
 
     def resume_session(self, session_id: str) -> Session:
         session = self.session_store.get(session_id)
@@ -105,13 +113,20 @@ class Orchestrator:
         self.policy.set_mode(session.permission_mode)
         # Restore prior transcript into in-memory state for real continuation.
         self.state.messages = self.session_store.read_messages(session.id)
+        self._task_store_cache = None
+        self._task_count_cache = len(self.task_store().list())
         self.session_store.event_log(session.id).write("session_resume", {"messages": len(self.state.messages)})
         return session
 
     def task_store(self) -> TaskStore:
         if self.state is None:
             raise RuntimeError("no active session")
-        return TaskStore(self.config.storage_root or (Path.home() / ".reidcli"), self.state.session.id)
+        if self._task_store_cache is None or self._task_store_cache.session_id != self.state.session.id:
+            self._task_store_cache = TaskStore(
+                self.config.storage_root or (Path.home() / ".reidcli"),
+                self.state.session.id,
+            )
+        return self._task_store_cache
 
     def submit_task(
         self,
@@ -132,6 +147,7 @@ class Orchestrator:
             raise RuntimeError("no active session; call start_session first")
         store = self.task_store()
         task = store.create(title or user_input[:60])
+        self._task_count_cache += 1
         store.update_status(task.id, TaskStatus.ACTIVE)
         self.state.active_task_id = task.id
 
@@ -173,7 +189,12 @@ class Orchestrator:
     def list_tasks(self) -> list:
         if self.state is None:
             return []
-        return self.task_store().list()
+        tasks = self.task_store().list()
+        self._task_count_cache = len(tasks)
+        return tasks
+
+    def task_count(self) -> int:
+        return self._task_count_cache
 
     def set_nyx(self, enabled: bool) -> None:
         """Toggle Nyx (redteam/offensive-security) persona. Rebuilds the Agent

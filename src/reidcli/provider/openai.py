@@ -109,7 +109,7 @@ class OpenAIProvider(BaseProvider):
         try:
             body = post_json(url, payload, self._headers())
         except RuntimeError:
-            log.exception("OpenAI-compatible request failed")
+            log.debug("OpenAI-compatible request failed", exc_info=True)
             raise
         return self._parse(body, model)
 

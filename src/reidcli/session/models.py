@@ -33,7 +33,7 @@ class Session(BaseModel):
     workspace: Path
     provider: str = "stub"
     model: str = "stub-v0"
-    reasoning_effort: str = "medium"
+    reasoning_effort: str = "low"
     permission_mode: PermissionMode = PermissionMode.BALANCED
     status: SessionStatus = SessionStatus.ACTIVE
     created_at: datetime = Field(default_factory=lambda: datetime.now(UTC))

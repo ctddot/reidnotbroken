@@ -8,7 +8,6 @@ from reidcli.policy.engine import PolicyEngine
 from reidcli.policy.models import PermissionMode
 from reidcli.tools import default_registry
 from reidcli.tools.base import ToolContext
-from reidcli.tools.file_tools import ReadFileTool, WriteFileTool
 
 
 def _ctx(tmp_path: Path, approver=None) -> ToolContext:  # type: ignore[no-untyped-def]
@@ -23,6 +22,12 @@ def test_registry_dispatch_unknown_tool(tmp_path: Path) -> None:
     result = reg.dispatch("nonexistent", {}, _ctx(tmp_path))
     assert not result.ok
     assert "unknown tool" in result.error
+
+
+def test_tool_schemas_are_cached_until_registration() -> None:
+    reg = default_registry()
+    first = reg.schemas()
+    assert reg.schemas() is first
 
 
 def test_file_tools_confined_to_workspace(tmp_path: Path) -> None:

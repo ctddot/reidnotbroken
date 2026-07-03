@@ -11,6 +11,9 @@ venv/
 .reidcli/
 *.session.json
 *.tasks.json
+settings.local.json
+.env
+.env.*
 
 # Editor
 .vscode/

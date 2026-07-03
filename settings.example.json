@@ -1,0 +1,29 @@
+{
+  "cleanupPeriodDays": 99999,
+  "env": {
+    "ANTHROPIC_API_KEY": "set-this-outside-git",
+    "ANTHROPIC_BASE_URL": "https://api.anthropic.com",
+    "ANTHROPIC_MODEL": "claude-sonnet-4-20250514",
+    "GEMINI_API_KEY": "set-this-outside-git",
+    "GEMINI_MODEL": "gemini-3-flash",
+    "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1",
+    "DISABLE_ERROR_REPORTING": "1"
+  },
+  "effortLevel": "low",
+  "skipDangerousModePermissionPrompt": false,
+  "theme": "dark",
+  "reidcli": {
+    "default_provider": "anthropic",
+    "log_level": "INFO",
+    "policy": {
+      "default_mode": "balanced",
+      "shell_timeout_seconds": 60
+    },
+    "providers": {
+      "anthropic": {
+        "name": "anthropic",
+        "default_model": "claude-sonnet-4-20250514"
+      }
+    }
+  }
+}

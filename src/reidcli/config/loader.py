@@ -91,7 +91,7 @@ class ConfigLoader:
         self.global_dir.mkdir(parents=True, exist_ok=True)
         path = self.global_dir / CONFIG_FILENAME
         path.write_text(
-            cfg.model_dump_json(indent=2, exclude_none=True, mode="json"),
+            json.dumps(cfg.model_dump(mode="json", exclude_none=True), indent=2),
             encoding="utf-8",
         )
 
@@ -99,6 +99,6 @@ class ConfigLoader:
         self.project_dir.mkdir(parents=True, exist_ok=True)
         path = self.project_dir / CONFIG_FILENAME
         path.write_text(
-            cfg.model_dump_json(indent=2, exclude_none=True, mode="json"),
+            json.dumps(cfg.model_dump(mode="json", exclude_none=True), indent=2),
             encoding="utf-8",
         )

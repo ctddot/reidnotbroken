@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from reidcli.config.models import Config, PolicyConfig, default_config
+from reidcli.config.models import PolicyConfig, default_config
 from reidcli.policy.engine import PolicyEngine
 from reidcli.policy.models import ActionKind, PermissionDecision, PermissionMode
 

@@ -11,6 +11,7 @@ from reidcli.config.models import Config
 from reidcli.diagnostics.logger import get_logger
 from reidcli.provider.anthropic import AnthropicProvider
 from reidcli.provider.base import BaseProvider
+from reidcli.provider.gemini import GeminiProvider
 from reidcli.provider.stub import StubProvider
 
 log = get_logger("reidcli.provider")
@@ -57,8 +58,13 @@ def default_registry(config: Config) -> ProviderRegistry:
         reg.register("anthropic", anthropic)
         log.debug("auto-registered anthropic provider from env vars")
 
+    gemini = GeminiProvider.from_env()
+    if gemini is not None:
+        reg.register("gemini", gemini)
+        log.debug("auto-registered gemini provider from env vars")
+
     for name in config.providers:
-        if name in ("stub", "anthropic"):
+        if name in ("stub", "anthropic", "gemini"):
             continue
         log.warning("provider '%s' configured but no client implementation yet (TODO)", name)
     return reg

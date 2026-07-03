@@ -7,6 +7,8 @@ syntax highlighting; tool calls hang under a bullet with their result.
 """
 from __future__ import annotations
 
+# ruff: noqa: E402
+import shutil
 import sys
 from datetime import UTC, datetime
 from pathlib import Path
@@ -124,13 +126,22 @@ def banner() -> None:
         ("  cwd: ", DIM),
         (str(Path.cwd()), DIM),
     )
-    panel = Panel(body, box=BOX, border_style=PRIMARY, padding=(0, 1), width=MAX_WIDTH)
+    cols = shutil.get_terminal_size(fallback=(100, 30)).columns
+    mascot_width = max(len(line) for line in _MASCOT.splitlines())
+    show_mascot = cols >= mascot_width + 50
+    panel_width = min(MAX_WIDTH, max(44, cols - 4))
+    if show_mascot:
+        panel_width = min(MAX_WIDTH, max(44, cols - mascot_width - 6))
+    panel = Panel(body, box=BOX, border_style=PRIMARY, padding=(0, 1), width=panel_width)
 
-    grid = Table.grid(padding=(0, 2))
-    grid.add_column()
-    grid.add_column()
-    grid.add_row(Text(_MASCOT, style=PRIMARY), panel)
-    console.print(grid)
+    if show_mascot:
+        grid = Table.grid(padding=(0, 2))
+        grid.add_column()
+        grid.add_column()
+        grid.add_row(Text(_MASCOT, style=PRIMARY), panel)
+        console.print(grid)
+    else:
+        console.print(panel)
 
 
 def status_line_text(status: dict) -> Text:
@@ -190,10 +201,8 @@ def print_user(text: str) -> None:
     from whatever came before (the prior reply) and after (this turn's
     reply)."""
     console.print()
-    console.print()
-    console.print(Text("  User", style=DIM))
-    console.print(Text.assemble((f"{PROMPT} ", f"bold {PRIMARY}"), (text, "bold")))
-    console.print()
+    console.print(Text("You", style=DIM))
+    console.print(Text(text, style="bold"))
     console.print()
 
 
@@ -206,7 +215,11 @@ def print_thinking(text: str) -> None:
 
 def print_assistant(text: str) -> None:
     """Markdown assistant output hanging under a ⏺ bullet."""
-    console.print(_bullet_grid(Text(BULLET, style=PRIMARY), Markdown(text)))
+    console.print()
+    console.print(Text("Reid", style=f"bold {PRIMARY}"))
+    console.print()
+    console.print(Markdown(text))
+    console.print()
 
 
 def print_tool_calls(tool_log: list[dict]) -> None:

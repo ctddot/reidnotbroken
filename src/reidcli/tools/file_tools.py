@@ -8,6 +8,8 @@ and diff generation are TODO (see roadmap Phase 5).
 from __future__ import annotations
 
 import re
+import shutil
+import subprocess
 from pathlib import Path
 from typing import Any
 
@@ -202,6 +204,28 @@ class GrepFilesTool(BaseTool):
             rx = re.compile(pattern)
         except re.error as exc:
             return ToolResult.fail(f"bad regex: {exc}")
+        rg = shutil.which("rg")
+        if rg is not None:
+            try:
+                proc = subprocess.run(
+                    [rg, "--line-number", "--color", "never", "--", pattern, str(base)],
+                    capture_output=True,
+                    text=True,
+                    timeout=10,
+                    check=False,
+                )
+            except (OSError, subprocess.TimeoutExpired):
+                proc = None
+            if proc is not None and proc.returncode in (0, 1):
+                hits: list[str] = []
+                for raw in proc.stdout.splitlines()[:200]:
+                    try:
+                        path_part, rest = raw.split(":", 1)
+                        rel = str(Path(path_part).resolve().relative_to(ctx.workspace_root))
+                        hits.append(f"{rel}:{rest.strip()}")
+                    except (ValueError, OSError):
+                        hits.append(raw.strip())
+                return ToolResult.ok_("\n".join(hits), count=len(hits), backend="rg")
         hits: list[str] = []
         for p in base.rglob("*"):
             if not p.is_file():

@@ -3,11 +3,15 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from reidcli.config.models import default_config
 from reidcli.provider.base import Message
+from reidcli.provider.stub import StubProvider
+from reidcli.runtime.orchestrator import Orchestrator
 from reidcli.session.models import Session, SessionStatus
 from reidcli.session.store import SessionStore
 from reidcli.tasks.models import TaskStatus
 from reidcli.tasks.store import TaskStore
+from reidcli.tools import default_registry
 
 
 def test_session_create_get_list(tmp_path: Path) -> None:
@@ -53,3 +57,14 @@ def test_task_create_update_status(tmp_path: Path) -> None:
     ts.update_status(t.id, TaskStatus.COMPLETED, summary="done")
     assert ts.get(t.id).status is TaskStatus.COMPLETED
     assert ts.get(t.id).summary == "done"
+
+
+def test_orchestrator_task_count_cache_updates(tmp_path: Path) -> None:
+    cfg = default_config()
+    cfg.workspace_root = tmp_path
+    cfg.storage_root = tmp_path
+    orch = Orchestrator(cfg, StubProvider(), default_registry())
+    orch.start_session("t")
+    assert orch.task_count() == 0
+    orch.submit_task("hello")
+    assert orch.task_count() == 1

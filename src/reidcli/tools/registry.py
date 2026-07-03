@@ -17,12 +17,14 @@ log = get_logger("reidcli.tools")
 class ToolRegistry:
     def __init__(self) -> None:
         self._tools: dict[str, BaseTool] = {}
+        self._schema_cache: list[dict[str, Any]] | None = None
 
     def register(self, tool: BaseTool) -> None:
         name = tool.definition.name
         if name in self._tools:
             raise ValueError(f"tool '{name}' already registered")
         self._tools[name] = tool
+        self._schema_cache = None
         log.debug("registered tool: %s", name)
 
     def get(self, name: str) -> BaseTool | None:
@@ -32,7 +34,9 @@ class ToolRegistry:
         return [t.definition for t in self._tools.values()]
 
     def schemas(self) -> list[dict[str, Any]]:
-        return [t.schema() for t in self._tools.values()]
+        if self._schema_cache is None:
+            self._schema_cache = [t.schema() for t in self._tools.values()]
+        return self._schema_cache
 
     def dispatch(self, name: str, args: dict[str, Any], ctx: ToolContext) -> ToolResult:
         tool = self.get(name)

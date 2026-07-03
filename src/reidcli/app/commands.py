@@ -121,6 +121,22 @@ def interactive(
     repl(orch, initial_prompt=initial)
 
 
+@app.command(name="tui-test")
+def tui_test(
+    prompt: str | None = typer.Argument(None, help=_PROMPT_ARG_HELP),
+    prompt_file: Path | None = typer.Option(None, "--file", "-f", help=_PROMPT_FILE_HELP),
+    nyx: bool = typer.Option(False, "--nyx", help=_NYX_HELP),
+) -> None:
+    """Launch TUI test, the experimental full-screen interface."""
+    initial = _resolve_prompt(prompt, prompt_file, fall_back_to_stdin=True)
+    orch = build_orchestrator()
+    if nyx:
+        orch.set_nyx(True)
+    from reidcli.ui.tui_test import run as run_tui_test
+
+    raise typer.Exit(code=run_tui_test(orch, initial_prompt=initial))
+
+
 @app.command(name="exec")
 def exec_(
     prompt: str | None = typer.Argument(None, help="Prompt to run non-interactively."),

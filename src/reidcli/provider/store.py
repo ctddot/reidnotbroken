@@ -23,13 +23,14 @@ from pathlib import Path
 from reidcli.diagnostics.logger import get_logger
 from reidcli.provider.anthropic import AnthropicProvider
 from reidcli.provider.base import BaseProvider
+from reidcli.provider.gemini import GeminiProvider
 from reidcli.provider.ollama import OllamaProvider
 from reidcli.provider.openai import OpenAICompatibleProvider, OpenAIProvider
 from reidcli.provider.registry import ProviderRegistry
 
 log = get_logger("reidcli.provider.store")
 
-SUPPORTED_KINDS = ("anthropic", "openai", "openai-compatible", "ollama")
+SUPPORTED_KINDS = ("anthropic", "openai", "openai-compatible", "ollama", "gemini")
 
 
 @dataclass
@@ -67,6 +68,12 @@ def build_provider(record: ProviderRecord) -> BaseProvider:
             default_model=record.default_model,
             api_key=record.api_key,
         )
+    if kind == "gemini":
+        return GeminiProvider(
+            api_key=record.api_key,
+            base_url=record.base_url,
+            default_model=record.default_model,
+        )
     raise ValueError(f"unsupported provider kind: {kind}")
 
 
@@ -78,7 +85,7 @@ class ProviderStore:
         if not self.path.exists():
             return []
         try:
-            data = json.loads(self.path.read_text(encoding="utf-8"))
+            data = json.loads(self.path.read_text(encoding="utf-8-sig"))
         except (OSError, ValueError):
             log.exception("failed to read providers.json; treating as empty")
             return []

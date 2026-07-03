@@ -69,13 +69,13 @@ ok runtime importable; provider available
 reidcli
 ```
 
-Drops you into the interactive TUI with a fresh session. Type `/` to see every
+Drops you into the interactive terminal chat with a fresh session. Type `/` to see every
 available command with descriptions, or just start talking. The stub provider
 is offline and exercisable without API keys.
 
 ---
 
-## The interactive TUI
+## The interactive terminal
 
 `reidcli` (with no subcommand, or `reidcli interactive`) launches a real
 full-screen `prompt_toolkit` application — the same style of terminal
@@ -186,6 +186,7 @@ descriptions — the table below is the same information, grouped.
 
 | Command | Purpose |
 |---|---|
+| `/usage` | Show current transcript size and last provider token usage |
 | `/model <name>` | Set the model for the session |
 | `/effort <level>` | Set reasoning effort: `low` `medium` `high` `xhigh` |
 | `/mode <mode>` | Set permission mode: `strict` `balanced` `autonomous` `custom` |
@@ -377,6 +378,11 @@ shell's own `ANTHROPIC_*` vars point somewhere else) and an optional
 (`theme`, `effortLevel`, ...) are ignored harmlessly, so an existing Claude
 Code settings file works as-is.
 
+Do not commit real provider keys in `settings.json`; use
+`settings.example.json` as the checked-in template and keep live credentials in
+environment variables, a local ignored settings file, or your global
+`~/.reidcli/settings.json`.
+
 Path resolution (first hit wins):
 
 1. `$REIDCHAT_SETTINGS` (explicit override)
@@ -397,6 +403,7 @@ Path resolution (first hit wins):
 | `REIDCLI_LOG_LEVEL` | Log level: `INFO` `DEBUG` `WARNING` `ERROR` |
 | `REIDCHAT_SETTINGS` | Explicit path override for the `settings.json` lookup above |
 | `ANTHROPIC_API_KEY` / `ANTHROPIC_BASE_URL` / `ANTHROPIC_MODEL` | Auto-registers an `anthropic` provider at startup (never made default; `/use anthropic`) |
+| `GEMINI_API_KEY` / `GEMINI_BASE_URL` / `GEMINI_MODEL` | Auto-registers a `gemini` provider at startup (never made default; `/use gemini`) |
 
 ### Config file example
 

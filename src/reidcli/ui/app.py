@@ -24,14 +24,18 @@ import functools
 import io
 import random
 import shutil
+import sys
 import threading
 import time
 from collections.abc import Callable
+from pathlib import Path
 
 from prompt_toolkit.application import Application
+from prompt_toolkit.application.current import get_app
 from prompt_toolkit.buffer import Buffer
 from prompt_toolkit.completion import Completer, Completion
-from prompt_toolkit.filters import Condition
+from prompt_toolkit.data_structures import Point
+from prompt_toolkit.filters import Condition, has_completions, is_done
 from prompt_toolkit.formatted_text import ANSI, to_formatted_text
 from prompt_toolkit.formatted_text.utils import split_lines
 from prompt_toolkit.history import InMemoryHistory
@@ -39,9 +43,11 @@ from prompt_toolkit.key_binding import KeyBindings
 from prompt_toolkit.keys import Keys
 from prompt_toolkit.layout import Float, FloatContainer, HSplit, Layout, VSplit, Window
 from prompt_toolkit.layout.containers import ConditionalContainer
-from prompt_toolkit.layout.controls import BufferControl, FormattedTextControl
-from prompt_toolkit.layout.menus import CompletionsMenu
+from prompt_toolkit.layout.controls import BufferControl, FormattedTextControl, UIContent, UIControl
+from prompt_toolkit.layout.dimension import Dimension
 from prompt_toolkit.mouse_events import MouseEvent, MouseEventType
+from prompt_toolkit.styles import Style
+from prompt_toolkit.utils import get_cwidth
 from rich.console import Console
 from rich.text import Text
 
@@ -163,6 +169,8 @@ class _OutputPane:
     def __init__(self) -> None:
         self._blocks: list[_Block] = []
         self.expanded = False  # global Ctrl+O toggle for collapsible blocks
+        self._line_cache: list | None = None
+        self._line_cache_expanded = self.expanded
         self.pinned = True
         self._cursor_line = 0  # only meaningful while not pinned
 
@@ -170,6 +178,7 @@ class _OutputPane:
         if not ansi_text:
             return
         self._blocks.append(_Block(fragments=to_formatted_text(ANSI(ansi_text))))
+        self._line_cache = None
 
     def append_collapsible(self, collapsed_ansi: str, expanded_ansi: str) -> None:
         self._blocks.append(
@@ -178,12 +187,15 @@ class _OutputPane:
                 expanded=to_formatted_text(ANSI(expanded_ansi)),
             )
         )
+        self._line_cache = None
 
     def toggle_expanded(self) -> None:
         self.expanded = not self.expanded
+        self._line_cache = None
 
     def reset(self) -> None:
         self._blocks = []
+        self._line_cache = None
         self.pinned = True
         self._cursor_line = 0
 
@@ -196,8 +208,14 @@ class _OutputPane:
                 out.extend(block.fragments)
         return out
 
+    def _lines(self) -> list:
+        if self._line_cache is None or self._line_cache_expanded != self.expanded:
+            self._line_cache = list(split_lines(self._all_fragments()))
+            self._line_cache_expanded = self.expanded
+        return self._line_cache
+
     def scroll_up(self, lines: int = 3) -> None:
-        total = max(1, len(list(split_lines(self._all_fragments()))))
+        total = max(1, len(self._lines()))
         base = (total - 1) if self.pinned else self._cursor_line
         self._cursor_line = max(0, base - lines)
         self.pinned = False
@@ -205,13 +223,21 @@ class _OutputPane:
     def scroll_down(self, lines: int = 3) -> None:
         if self.pinned:
             return
-        total = max(1, len(list(split_lines(self._all_fragments()))))
+        total = max(1, len(self._lines()))
         self._cursor_line = min(total - 1, self._cursor_line + lines)
         if self._cursor_line >= total - 1:
             self.pinned = True
 
+    def scroll_top(self) -> None:
+        self._cursor_line = 0
+        self.pinned = False
+
+    def scroll_bottom(self) -> None:
+        self._cursor_line = 0
+        self.pinned = True
+
     def get_fragments(self):  # type: ignore[no-untyped-def]
-        lines = list(split_lines(self._all_fragments()))
+        lines = self._lines()
         total = len(lines)
         if total == 0:
             return [("[SetCursorPosition]", "")]
@@ -260,6 +286,14 @@ class SlashCommandCompleter(Completer):
     else, so it's invisible while typing a normal prompt.
     """
 
+    def __init__(self, orchestrator: Orchestrator) -> None:
+        self.orchestrator = orchestrator
+
+    def _word_completion(self, word: str, values: list[str]):  # type: ignore[no-untyped-def]
+        for value in values:
+            if value.startswith(word):
+                yield Completion(value, start_position=-len(word))
+
     def get_completions(self, document, complete_event):  # type: ignore[no-untyped-def]
         text = document.text_before_cursor
         if not text.startswith("/"):
@@ -275,6 +309,31 @@ class SlashCommandCompleter(Completer):
                     yield Completion(name, start_position=-len(prefix), display=display, display_meta=desc)
             return
 
+        arg_completions = {
+            "/mode ": ["strict", "balanced", "autonomous", "custom"],
+            "/effort ": list(_EFFORT_LEVELS),
+            "/nyx ": ["on", "off"],
+            "/plan ": ["on", "off"],
+            "/web ": ["on", "off"],
+            "/theme ": ["reid", "dark", "high-contrast"],
+            "/tools enable ": [d.name for d in self.orchestrator.tools.definitions()],
+            "/tools disable ": [d.name for d in self.orchestrator.tools.definitions()],
+            "/use ": self.orchestrator.providers.names() if self.orchestrator.providers is not None else [],
+            "/resume ": [s.id for s in self.orchestrator.session_store.list()],
+            "/session delete ": [s.id for s in self.orchestrator.session_store.list()],
+            "/prompt ": [wf.name for wf in self.orchestrator.workflow_store.list()],
+            "/workflow run ": [wf.name for wf in self.orchestrator.workflow_store.list()],
+            "/workflow show ": [wf.name for wf in self.orchestrator.workflow_store.list()],
+            "/workflow delete ": [wf.name for wf in self.orchestrator.workflow_store.list()],
+        }
+        for prefix, values in arg_completions.items():
+            if text.startswith(prefix):
+                word = text[len(prefix) :]
+                if " " in word:
+                    return
+                yield from self._word_completion(word, values)
+                return
+
         word = text[1:]
         if " " in word:
             return
@@ -283,6 +342,74 @@ class SlashCommandCompleter(Completer):
             if token.startswith(word):
                 display = f"{cmd} {args}".rstrip()
                 yield Completion(f"/{token}", start_position=-len(text), display=display, display_meta=desc)
+
+
+class _DarkCompletionsControl(UIControl):
+    """Completion menu with explicit dark fragments.
+
+    prompt_toolkit's stock menu is theme-driven. Some Windows terminals kept
+    rendering its default gray block, so this control paints every cell itself.
+    """
+
+    def has_focus(self) -> bool:
+        return False
+
+    def preferred_width(self, max_available_width: int) -> int | None:
+        state = get_app().current_buffer.complete_state
+        if state is None:
+            return 0
+        left = max(10, max(get_cwidth(c.display_text) for c in state.completions) + 1)
+        right = max((get_cwidth(c.display_meta_text) for c in state.completions), default=0) + 1
+        return min(max_available_width, left + right)
+
+    def preferred_height(self, width: int, max_available_height: int, wrap_lines: bool, get_line_prefix) -> int | None:  # type: ignore[no-untyped-def]
+        state = get_app().current_buffer.complete_state
+        return min(max_available_height, len(state.completions)) if state else 0
+
+    @staticmethod
+    def _fit(text: str, width: int) -> str:
+        if width <= 0:
+            return ""
+        if get_cwidth(text) > width:
+            while text and get_cwidth(text + "...") > width:
+                text = text[:-1]
+            return text + "..."
+        return text + (" " * max(0, width - get_cwidth(text)))
+
+    def create_content(self, width: int, height: int) -> UIContent:
+        state = get_app().current_buffer.complete_state
+        if state is None:
+            return UIContent()
+        completions = state.completions
+        index = state.complete_index or 0
+        left_width = max(10, min(width, max(get_cwidth(c.display_text) for c in completions) + 1))
+        meta_width = max(0, width - left_width)
+
+        def get_line(i: int):
+            completion = completions[i]
+            current = i == index
+            bg = "#ff5f5f bold" if current else "#ff5f5f"
+            meta = "#ff8a8a" if current else "#ff5f5f"
+            left = self._fit(" " + completion.display_text, left_width)
+            right = self._fit(" " + completion.display_meta_text, meta_width)
+            return [(bg, left), (meta, right)]
+
+        return UIContent(get_line=get_line, cursor_position=Point(x=0, y=index), line_count=len(completions))
+
+
+class _DarkCompletionsMenu(ConditionalContainer):
+    def __init__(self) -> None:
+        super().__init__(
+            content=Window(
+                content=_DarkCompletionsControl(),
+                width=Dimension(min=10),
+                height=Dimension(min=1, max=10),
+                dont_extend_width=True,
+                style="",
+                z_index=10**8,
+            ),
+            filter=has_completions & ~is_done,
+        )
 
 
 class ChatApp:
@@ -295,6 +422,7 @@ class ChatApp:
         self._history = InMemoryHistory()
         self._thinking = {"flag": False, "start": 0.0, "gerund": "", "last_swap": 0.0}
         self._cancel_event: threading.Event | None = None
+        self._cancel_confirm_until = 0.0
         self._approving: dict = {"flag": False, "prompt": "", "result": False, "event": None}
         self._loop: asyncio.AbstractEventLoop | None = None
         self._initial_prompt = (initial_prompt or "").strip()
@@ -306,7 +434,7 @@ class ChatApp:
             history=self._history,
             multiline=False,
             read_only=Condition(lambda: self._approving["flag"]),
-            completer=SlashCommandCompleter(),
+            completer=SlashCommandCompleter(orchestrator),
             complete_while_typing=True,
         )
         self.app: Application = Application(
@@ -314,6 +442,17 @@ class ChatApp:
             key_bindings=self._build_key_bindings(),
             full_screen=True,
             mouse_support=True,
+            style=Style.from_dict(
+                {
+                    "completion-menu": "#ff5f5f",
+                    "completion-menu.completion": "#ff5f5f",
+                    "completion-menu.completion.current": "#ff5f5f bold",
+                    "completion-menu.meta": "#ff5f5f",
+                    "completion-menu.meta.completion.current": "#ff8a8a",
+                    "scrollbar.background": "bg:#141414",
+                    "scrollbar.button": "bg:#5f5f5f",
+                }
+            ),
         )
 
     # --- setup -----------------------------------------------------------
@@ -498,6 +637,22 @@ class ChatApp:
         self.output.scroll_down(3)
         self.app.invalidate()
 
+    def _scroll_page_up(self) -> None:
+        self.output.scroll_up(15)
+        self.app.invalidate()
+
+    def _scroll_page_down(self) -> None:
+        self.output.scroll_down(15)
+        self.app.invalidate()
+
+    def _scroll_top(self) -> None:
+        self.output.scroll_top()
+        self.app.invalidate()
+
+    def _scroll_bottom(self) -> None:
+        self.output.scroll_bottom()
+        self.app.invalidate()
+
     # --- status / spinner content -----------------------------------------
 
     def _estimate_tokens(self) -> int:
@@ -533,7 +688,7 @@ class ChatApp:
             "tokens_used": self._estimate_tokens(),
             "context_window": context_window_for(st.session.model),
             "workspace": str(st.session.workspace),
-            "tasks": len(self.orchestrator.list_tasks()),
+            "tasks": self.orchestrator.task_count(),
         }
 
     def _status_fragments(self):  # type: ignore[no-untyped-def]
@@ -586,6 +741,8 @@ class ChatApp:
             return [("", "")]
         if self._cancel_event is not None and self._cancel_event.is_set():
             return [("#ffd75f bold", "  ◐ stopping… "), ("#9e9e9e", "(esc pressed, finishing current step)")]
+        if time.monotonic() < self._cancel_confirm_until:
+            return [("#ffd75f bold", "  Esc again to interrupt "), ("#9e9e9e", "(continues if not confirmed)")]
         now = time.monotonic()
         if now - self._thinking["last_swap"] > 8.0:
             self._thinking["gerund"] = random.choice(_GERUNDS)
@@ -626,13 +783,13 @@ class ChatApp:
 
         input_window = Window(BufferControl(buffer=self._buf), wrap_lines=False, height=1)
 
-        box = HSplit(
+        input_box = HSplit(
             [
                 VSplit([corner("╭"), hline(), corner("╮")], height=1),
                 VSplit(
                     [
                         Window(FormattedTextControl(lambda: [(self._box_color(), "│")]), width=1, height=1),
-                        Window(FormattedTextControl(lambda: [(f"{self._box_color()} bold", " › ")]), width=3, height=1),
+                        Window(FormattedTextControl(lambda: [(f"{self._box_color()} bold", " You"), ("#8a8a8a", " > ")]), width=7, height=1),
                         input_window,
                         Window(FormattedTextControl(lambda: [(self._box_color(), "│")]), width=1, height=1),
                     ],
@@ -652,13 +809,13 @@ class ChatApp:
             filter=Condition(self._subagent_rows_visible),
         )
 
-        root = HSplit([output_window, spinner_window, box, subagent_panel, status_window])
+        root = HSplit([output_window, spinner_window, input_box, subagent_panel, status_window])
         # Floats above the cursor position of the focused control (the input
         # buffer) — this is what makes the "/" completion menu pop up right
         # above/below the box as you type, instead of requiring /help.
         floated = FloatContainer(
             content=root,
-            floats=[Float(xcursor=True, ycursor=True, content=CompletionsMenu(max_height=10, scroll_offset=1))],
+            floats=[Float(xcursor=True, ycursor=True, content=_DarkCompletionsMenu())],
         )
         return Layout(floated, focused_element=input_window)
 
@@ -706,8 +863,14 @@ class ChatApp:
             # Stops the in-flight response, not the session — the running turn
             # ends at its next safe point (see Agent.run_turn's `cancel` polling)
             # instead of the whole app exiting, matching Claude Code's Escape.
-            if self._cancel_event is not None:
-                self._cancel_event.set()
+            now = time.monotonic()
+            if now < self._cancel_confirm_until:
+                if self._cancel_event is not None:
+                    self._cancel_event.set()
+                self._cancel_confirm_until = 0.0
+            else:
+                self._cancel_confirm_until = now + 2.0
+            self.app.invalidate()
 
         @kb.add("c-c")
         def _clear_line(event) -> None:  # type: ignore[no-untyped-def]
@@ -722,6 +885,22 @@ class ChatApp:
         def _toggle_collapse(event) -> None:  # type: ignore[no-untyped-def]
             self.output.toggle_expanded()
             self.app.invalidate()
+
+        @kb.add("pageup")
+        def _page_up(event) -> None:  # type: ignore[no-untyped-def]
+            self._scroll_page_up()
+
+        @kb.add("pagedown")
+        def _page_down(event) -> None:  # type: ignore[no-untyped-def]
+            self._scroll_page_down()
+
+        @kb.add("home", filter=is_buffer_empty & ~is_thinking & ~is_approving)
+        def _top(event) -> None:  # type: ignore[no-untyped-def]
+            self._scroll_top()
+
+        @kb.add("end", filter=is_buffer_empty & ~is_thinking & ~is_approving)
+        def _bottom(event) -> None:  # type: ignore[no-untyped-def]
+            self._scroll_bottom()
 
         @kb.add(Keys.BracketedPaste, filter=~is_approving)
         def _paste(event) -> None:  # type: ignore[no-untyped-def]
@@ -861,6 +1040,10 @@ class ChatApp:
                 self.app.exit(result=0)
             elif outcome.startswith("workflow-run:"):
                 await self._run_workflow(outcome.split(":", 1)[1])
+            elif outcome.startswith("prompt-run:"):
+                await self._submit_text(outcome.split(":", 1)[1])
+            elif outcome.startswith("deepreid-run:"):
+                await self._run_deepreid(outcome.split(":", 1)[1])
             return
 
         self._append_output(lambda: render.print_user(text))
@@ -868,6 +1051,7 @@ class ChatApp:
         self._thinking["start"] = time.monotonic()
         self._thinking["gerund"] = random.choice(_GERUNDS)
         self._thinking["last_swap"] = self._thinking["start"]
+        self._cancel_confirm_until = 0.0
         self.app.invalidate()
 
         cancel_event = threading.Event()
@@ -891,6 +1075,7 @@ class ChatApp:
         finally:
             self._thinking["flag"] = False
             self._cancel_event = None
+            self._cancel_confirm_until = 0.0
             self.app.invalidate()
 
     def _run_slash(self, text: str) -> str:
@@ -954,7 +1139,7 @@ class ChatApp:
             event.set()
 
 
-def run(orchestrator: Orchestrator, initial_prompt: str | None = None) -> int:
+def _fullscreen_run(orchestrator: Orchestrator, initial_prompt: str | None = None) -> int:
     """Entry point: build and run the full-screen chat app.
 
     Reuses an already-resumed session or starts fresh (matching the prior
@@ -975,3 +1160,434 @@ def run(orchestrator: Orchestrator, initial_prompt: str | None = None) -> int:
         render.console = original_console
     render.console.print(Text("bye.", style="dim"))
     return code or 0
+
+
+def _terminal_header(orchestrator: Orchestrator) -> None:
+    if orchestrator.state is None:
+        return
+    st = orchestrator.state.session
+    render.console.print(
+        Text.assemble(
+            ("ReidCLI", f"bold {PRIMARY}"),
+            ("  ·  ", DIM),
+            (st.provider, DIM),
+            ("  ·  ", DIM),
+            (st.model, DIM),
+            ("  ·  ", DIM),
+            (st.permission_mode.value, DIM),
+            ("  ·  ", DIM),
+            (f"effort:{st.reasoning_effort}", DIM),
+        )
+    )
+    render.console.print()
+
+
+def _terminal_approve(prompt_text: str) -> bool:
+    answer = render.console.input(f"[bold {WARN}]{prompt_text}[/] [dim]y/N[/] ")
+    return answer.strip().lower() in ("y", "yes")
+
+
+def _terminal_emit_result(result: dict, *, show_thinking: bool) -> None:
+    thinking = (result.get("thinking") or "").strip()
+    if thinking and show_thinking:
+        render.print_thinking(thinking)
+    render.print_tool_calls(result.get("tools", []))
+    render.print_assistant(result["text"])
+
+
+def _terminal_error_message(orchestrator: Orchestrator, exc: Exception) -> str:
+    raw = str(exc).strip() or exc.__class__.__name__
+    provider = orchestrator.state.session.provider if orchestrator.state is not None else "provider"
+    lower = raw.lower()
+    if "http 401" in lower or "invalid api key" in lower or "unauthorized" in lower:
+        return (
+            f"{provider} rejected the API key (401). "
+            "Update it with /config set openai_api_key <key>, set OPENAI_API_KEY, or switch with /use stub."
+        )
+    if "connection error" in lower:
+        return f"could not reach {provider}: {raw}"
+    if len(raw) > 300:
+        raw = raw[:297] + "..."
+    return raw
+
+
+def _terminal_turn_summary(orchestrator: Orchestrator, result: dict, seconds: int) -> Text:
+    state = orchestrator.state
+    prompt_tokens = state.last_usage_prompt_tokens if state else 0
+    completion_tokens = state.last_usage_completion_tokens if state else 0
+    total_tokens = prompt_tokens + completion_tokens
+    tools = result.get("tools", [])
+    files_read = sum(1 for entry in tools if entry.get("name") == "read_file" and entry.get("ok"))
+    parts: list[tuple[str, str]] = [
+        (f"    {SPARKLE} Thought {_format_elapsed(seconds)}", DIM),
+        ("  ·  ", DIM),
+        (f"↑ {fmt_tokens(total_tokens)} tokens", DIM),
+    ]
+    if files_read:
+        parts.extend([("  ·  ", DIM), (f"{files_read} files read", DIM)])
+    if tools:
+        parts.extend([("  ·  ", DIM), (f"{len(tools)} tools", DIM)])
+    return Text.assemble(*parts)
+
+
+def _terminal_turn_summary_line(orchestrator: Orchestrator, result: dict, seconds: int) -> str:
+    state = orchestrator.state
+    prompt_tokens = state.last_usage_prompt_tokens if state else 0
+    completion_tokens = state.last_usage_completion_tokens if state else 0
+    total_tokens = prompt_tokens + completion_tokens
+    tools = result.get("tools", [])
+    files_read = sum(1 for entry in tools if entry.get("name") == "read_file" and entry.get("ok"))
+    parts = [f"    {SPARKLE} Thought {_format_elapsed(seconds)}", f"↑ {fmt_tokens(total_tokens)} tokens"]
+    if files_read:
+        parts.append(f"{files_read} files read")
+    if tools:
+        parts.append(f"{len(tools)} tools")
+    return "  ·  ".join(parts)
+
+
+def _format_elapsed(seconds: int) -> str:
+    if seconds < 60:
+        return f"{seconds}s"
+    minutes, rem = divmod(seconds, 60)
+    if minutes < 60:
+        return f"{minutes}m {rem}s" if rem else f"{minutes}m"
+    hours, minutes = divmod(minutes, 60)
+    return f"{hours}h {minutes}m" if minutes else f"{hours}h"
+
+
+def _poll_ctrl_b() -> bool:
+    if sys.platform != "win32":
+        return False
+    try:
+        import msvcrt
+    except ImportError:
+        return False
+    pressed = False
+    while msvcrt.kbhit():
+        ch = msvcrt.getwch()
+        if ch == "\x02":
+            pressed = True
+    return pressed
+
+
+def _poll_escape() -> bool:
+    if sys.platform != "win32":
+        return False
+    try:
+        import msvcrt
+    except ImportError:
+        return False
+    pressed = False
+    while msvcrt.kbhit():
+        ch = msvcrt.getwch()
+        if ch == "\x1b":
+            pressed = True
+    return pressed
+
+
+def _poll_terminal_keys() -> tuple[bool, bool]:
+    if sys.platform != "win32":
+        return False, False
+    try:
+        import msvcrt
+    except ImportError:
+        return False, False
+    ctrl_b = False
+    esc = False
+    while msvcrt.kbhit():
+        ch = msvcrt.getwch()
+        if ch == "\x02":
+            ctrl_b = True
+        elif ch == "\x1b":
+            esc = True
+    return ctrl_b, esc
+
+
+def _clear_thinking_line(width: int = 120) -> None:
+    stream = render.console.file
+    stream.write("\r" + (" " * width) + "\r")
+    stream.flush()
+
+
+def _clear_previous_status_line(width: int) -> None:
+    stream = render.console.file
+    stream.write("\x1b[1A\r" + (" " * width) + "\r")
+    stream.flush()
+
+
+def _thinking_line(
+    seconds: int,
+    frame: int,
+    show_thinking: bool,
+    *,
+    confirm_cancel: bool = False,
+    stopping: bool = False,
+) -> str:
+    colors = ("31", "91", "37", "90")
+    color = colors[frame % len(colors)]
+    logo = "\x1b[97m◇\x1b[0m"
+    if stopping:
+        detail = "stopping..."
+    elif confirm_cancel:
+        detail = "esc again to interrupt"
+    else:
+        detail = "details:on" if show_thinking else "ctrl+b details"
+    return (
+        f"\r    {logo} \x1b[{color}mThinking\x1b[0m"
+        f"\x1b[90m {_format_elapsed(seconds)}  ·  {detail}\x1b[0m"
+    )
+
+
+def _run_turn_with_thinking(orchestrator: Orchestrator, text: str) -> tuple[dict, int, bool]:
+    if not sys.stdout.isatty():
+        started = time.monotonic()
+        return orchestrator.submit_task(text, approver=_terminal_approve), int(time.monotonic() - started), False
+
+    holder: dict = {"result": None, "error": None}
+    show_thinking = False
+    cancel_event = threading.Event()
+    cancel_confirm_until = 0.0
+    started = time.monotonic()
+
+    def _worker() -> None:
+        try:
+            holder["result"] = orchestrator.submit_task(text, approver=_terminal_approve, cancel=cancel_event.is_set)
+        except Exception as exc:  # noqa: BLE001 - surface after spinner clears
+            holder["error"] = exc
+
+    thread = threading.Thread(target=_worker, daemon=True)
+    thread.start()
+    frame = 0
+    while thread.is_alive():
+        ctrl_b, esc = _poll_terminal_keys()
+        if ctrl_b:
+            show_thinking = not show_thinking
+        now = time.monotonic()
+        if esc:
+            if now < cancel_confirm_until:
+                cancel_event.set()
+                cancel_confirm_until = 0.0
+            else:
+                cancel_confirm_until = now + 2.0
+        render.console.file.write(
+            _thinking_line(
+                int(now - started),
+                frame,
+                show_thinking,
+                confirm_cancel=now < cancel_confirm_until,
+                stopping=cancel_event.is_set(),
+            )
+        )
+        render.console.file.flush()
+        frame += 1
+        time.sleep(0.16)
+    thread.join()
+    _clear_thinking_line()
+    if holder["error"] is not None:
+        raise holder["error"]
+    return holder["result"], int(time.monotonic() - started), show_thinking
+
+
+def _terminal_submit(orchestrator: Orchestrator, text: str) -> tuple[str, str | None]:
+    if text.startswith("/"):
+        if text.strip() == "/clear":
+            render.console.clear()
+            return "continue", None
+        outcome = handle_command(orchestrator, text)
+        if outcome.startswith("prompt-run:"):
+            return _terminal_submit(orchestrator, outcome.split(":", 1)[1])
+        if outcome.startswith("deepreid-run:"):
+            from reidcli.deepreid import format_markdown, run_deepreid, save_deepreid_result
+
+            task = outcome.split(":", 1)[1]
+            result = run_deepreid(orchestrator.config, orchestrator.provider, Path.cwd(), task, on_progress=render.print_info)
+            path = save_deepreid_result(orchestrator.config, result)
+            render.print_assistant(format_markdown(result))
+            render.print_info(f"saved to {path}")
+            return "continue", None
+        return outcome, None
+    try:
+        result, seconds, show_thinking = _run_turn_with_thinking(orchestrator, text)
+    except Exception as exc:  # noqa: BLE001 - keep interactive terminal alive
+        render.print_error(_terminal_error_message(orchestrator, exc))
+        render.console.print()
+        return "continue", None
+    summary = _terminal_turn_summary_line(orchestrator, result, seconds)
+    _terminal_emit_result(result, show_thinking=show_thinking)
+    render.console.print()
+    return "continue", summary
+
+
+def _terminal_run_workflow(orchestrator: Orchestrator, name: str) -> None:
+    workflow = orchestrator.workflow_store.get(name)
+    if workflow is None:
+        render.print_error(f"no such workflow: {name}")
+        return
+    render.print_info(f"running workflow '{name}' ({len(workflow.steps)} steps)")
+    for step in workflow.steps:
+        outcome, _summary = _terminal_submit(orchestrator, step)
+        if outcome == "exit":
+            break
+
+
+def _terminal_box_width() -> int:
+    cols = shutil.get_terminal_size(fallback=(100, 30)).columns
+    return max(48, cols - 4)
+
+
+def _terminal_box_top() -> None:
+    width = _terminal_box_width()
+    render.console.print(Text("╭" + ("─" * (width - 2)) + "╮", style=PRIMARY))
+
+
+def _terminal_box_bottom() -> None:
+    width = _terminal_box_width()
+    render.console.print(Text("╰" + ("─" * (width - 2)) + "╯", style=PRIMARY))
+
+
+def _terminal_box_bottom_fragments() -> list[tuple[str, str]]:
+    width = _terminal_box_width()
+    return [(PRIMARY, "╰" + ("─" * (width - 2)) + "╯")]
+
+
+def _terminal_prompt_fragments() -> list[tuple[str, str]]:
+    return [
+        ("#ff5f5f", "│"),
+        ("#ff5f5f bold", " You"),
+        ("#8a8a8a", " > "),
+    ]
+
+
+def _terminal_prompt_right_fragments() -> list[tuple[str, str]]:
+    return [(PRIMARY, "│")]
+
+
+def _terminal_read_input(orchestrator: Orchestrator, history: InMemoryHistory, status_line: str | None) -> str:
+    width = _terminal_box_width()
+    prompt_width = 8
+    input_width = max(20, width - prompt_width - 1)
+    text_buffer = Buffer(
+        history=history,
+        completer=SlashCommandCompleter(orchestrator),
+        complete_while_typing=True,
+        multiline=False,
+    )
+
+    kb = KeyBindings()
+
+    @kb.add("enter")
+    def _accept(event) -> None:  # type: ignore[no-untyped-def]
+        event.app.exit(result=text_buffer.text)
+
+    @kb.add("c-c")
+    def _cancel(event) -> None:  # type: ignore[no-untyped-def]
+        event.app.exit(exception=KeyboardInterrupt)
+
+    top = Window(
+        FormattedTextControl([(PRIMARY, "╭" + ("─" * (width - 2)) + "╮")]),
+        width=Dimension.exact(width),
+        height=1,
+    )
+    middle = VSplit(
+        [
+            Window(
+                FormattedTextControl(
+                    [
+                        (PRIMARY, "│"),
+                        (f"{PRIMARY} bold", " You"),
+                        ("#8a8a8a", " > "),
+                    ]
+                ),
+                width=Dimension.exact(prompt_width),
+                height=1,
+            ),
+            Window(
+                BufferControl(buffer=text_buffer),
+                width=Dimension.exact(input_width),
+                height=1,
+                wrap_lines=False,
+            ),
+            Window(FormattedTextControl([(PRIMARY, "│")]), width=Dimension.exact(1), height=1),
+        ],
+        width=Dimension.exact(width),
+        height=1,
+    )
+    bottom = Window(
+        FormattedTextControl([(PRIMARY, "╰" + ("─" * (width - 2)) + "╯")]),
+        width=Dimension.exact(width),
+        height=1,
+    )
+    status = Window(
+        FormattedTextControl([("#6f6f6f", status_line or "")]),
+        width=Dimension.exact(width),
+        height=1,
+    )
+    content = [top, middle, bottom]
+    if status_line:
+        content.append(status)
+    root = FloatContainer(
+        content=HSplit(content, width=Dimension.exact(width)),
+        floats=[Float(xcursor=True, ycursor=True, content=_DarkCompletionsMenu())],
+    )
+    app = Application(
+        layout=Layout(root, focused_element=text_buffer),
+        key_bindings=kb,
+        full_screen=False,
+        erase_when_done=False,
+        style=Style.from_dict(
+            {
+                "completion-menu": "#ff5f5f",
+                "completion-menu.completion": "#ff5f5f",
+                "completion-menu.completion.current": "#ff5f5f bold",
+                "completion-menu.meta": "#ff5f5f",
+                "completion-menu.meta.completion.current": "#ff8a8a",
+            }
+        ),
+    )
+    text = (app.run() or "").strip()
+    if status_line:
+        _clear_previous_status_line(width)
+    return text
+
+
+def _terminal_run(orchestrator: Orchestrator, initial_prompt: str | None = None) -> int:
+    """Run the normal terminal chat loop with native scrollback."""
+    if orchestrator.state is None:
+        orchestrator.start_session(title="interactive")
+    render.banner()
+    _terminal_header(orchestrator)
+
+    if initial_prompt and initial_prompt.strip():
+        outcome, _summary = _terminal_submit(orchestrator, initial_prompt.strip())
+        if outcome == "exit":
+            render.console.print(Text("bye.", style=DIM))
+            return 0
+        if outcome.startswith("workflow-run:"):
+            _terminal_run_workflow(orchestrator, outcome.split(":", 1)[1])
+
+        if not sys.stdin.isatty() or not sys.stdout.isatty():
+            return 0
+
+    history = InMemoryHistory()
+    last_summary: str | None = None
+
+    while True:
+        try:
+            text = _terminal_read_input(orchestrator, history, last_summary)
+        except (EOFError, KeyboardInterrupt):
+            render.console.print(Text("bye.", style=DIM))
+            return 0
+        if not text:
+            continue
+        outcome, summary = _terminal_submit(orchestrator, text)
+        if summary is not None:
+            last_summary = summary
+        if outcome == "exit":
+            render.console.print(Text("bye.", style=DIM))
+            return 0
+        if outcome.startswith("workflow-run:"):
+            _terminal_run_workflow(orchestrator, outcome.split(":", 1)[1])
+
+
+def run(orchestrator: Orchestrator, initial_prompt: str | None = None) -> int:
+    return _terminal_run(orchestrator, initial_prompt=initial_prompt)

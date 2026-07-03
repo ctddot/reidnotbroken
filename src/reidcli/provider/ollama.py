@@ -78,7 +78,7 @@ class OllamaProvider(BaseProvider):
         try:
             body = post_json(f"{self.base_url}/api/chat", payload, {})
         except RuntimeError:
-            log.exception("Ollama request failed")
+            log.debug("Ollama request failed", exc_info=True)
             raise
 
         msg = body.get("message", {}) or {}

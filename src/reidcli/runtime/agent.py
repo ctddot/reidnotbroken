@@ -28,6 +28,7 @@ from reidcli.tools.registry import ToolRegistry
 log = get_logger("reidcli.agent")
 
 MAX_STEPS = 8
+MAX_CONTEXT_MESSAGES = 80
 
 BASE_SYSTEM_PROMPT = (
     "You are an AI coding assistant running inside ReidVerse-Cli, a terminal "
@@ -104,10 +105,28 @@ class Agent:
             + _environment_context(state.session.workspace)
             + system_prompt_suffix(state.session.reasoning_effort)
         )
+        if self.context_extras.get("plan_enabled"):
+            prompt += (
+                "\n\n<planning>"
+                "\nBefore making changes for non-trivial work, briefly state the plan, "
+                "then execute it. Keep plans short and update only when direction changes."
+                "\n</planning>"
+            )
         if not state.messages or state.messages[0].role != "system":
             state.messages.insert(0, Message(role="system", content=prompt))
         else:
             state.messages[0].content = prompt
+
+    def _provider_messages(self, state: RuntimeState) -> list[Message]:
+        """Return bounded provider context while preserving full session state."""
+        if len(state.messages) <= MAX_CONTEXT_MESSAGES:
+            return state.messages
+        system = state.messages[:1] if state.messages and state.messages[0].role == "system" else []
+        tail_budget = MAX_CONTEXT_MESSAGES - len(system)
+        tail = state.messages[-tail_budget:]
+        while tail and tail[0].role != "user":
+            tail = tail[1:]
+        return [*system, *tail]
 
     def run_turn(
         self,
@@ -133,6 +152,8 @@ class Agent:
         self._ensure_system(state)
         state.messages.append(Message(role="user", content=user_input))
         ctx = self._context(state, writable_roots or [], approver)
+        disabled_tools = set(self.context_extras.get("disabled_tools") or set())
+        tool_schemas = [schema for schema in self.tools.schemas() if schema.get("name") not in disabled_tools]
         tool_log: list[dict] = []
         final_text = ""
         state.last_thinking = None  # fresh per turn; the UI reads it after run_turn
@@ -142,7 +163,7 @@ class Agent:
                 final_text = final_text or "[cancelled by user]"
                 break
             resp: ProviderResponse = self.provider.chat(
-                state.messages, self.tools.schemas(), state.session.model
+                self._provider_messages(state), tool_schemas, state.session.model
             )
             # Latest call's usage, not summed — see RuntimeState's field docstring.
             state.last_usage_prompt_tokens = resp.usage.prompt_tokens
@@ -167,7 +188,12 @@ class Agent:
                 if cancel is not None and cancel():
                     cancelled_mid_tools = True
                     break
-                result = self.tools.dispatch(call.name, call.arguments, ctx)
+                if call.name in disabled_tools:
+                    from reidcli.tools.base import ToolResult
+
+                    result = ToolResult.fail(f"tool disabled for this session: {call.name}")
+                else:
+                    result = self.tools.dispatch(call.name, call.arguments, ctx)
                 tool_log.append(
                     {"name": call.name, "args": call.arguments, "ok": result.ok, "error": result.error}
                 )

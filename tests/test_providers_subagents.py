@@ -5,10 +5,11 @@ from pathlib import Path
 
 from reidcli.config.models import default_config
 from reidcli.policy.engine import PolicyEngine
+from reidcli.provider.base import Message, ToolCall
+from reidcli.provider.gemini import GeminiProvider
 from reidcli.provider.registry import ProviderRegistry
 from reidcli.provider.store import ProviderRecord, ProviderStore, load_into
 from reidcli.provider.stub import StubProvider
-from reidcli.runtime.agent import Agent
 from reidcli.runtime.state import RuntimeState
 from reidcli.runtime.subagent import SubagentManager
 from reidcli.session.models import Session
@@ -48,6 +49,18 @@ def test_provider_store_roundtrip(tmp_path: Path) -> None:
     assert store.get("local") is None
 
 
+def test_provider_store_reads_utf8_bom_file(tmp_path: Path) -> None:
+    path = tmp_path / "providers.json"
+    path.write_text(
+        '\ufeff{"providers":[{"name":"reidverse","kind":"openai","base_url":"https://example.test","api_key":"k","default_model":"gpt"}]}',
+        encoding="utf-8",
+    )
+    rec = ProviderStore(tmp_path).get("reidverse")
+    assert rec is not None
+    assert rec.kind == "openai"
+    assert rec.api_key == "k"
+
+
 def test_load_into_registers_provider(tmp_path: Path) -> None:
     ProviderStore(tmp_path).save(
         ProviderRecord(name="local", kind="ollama", base_url="http://localhost:11434", default_model="llama3.2")
@@ -57,6 +70,49 @@ def test_load_into_registers_provider(tmp_path: Path) -> None:
     added = load_into(reg, tmp_path)
     assert added == ["local"]
     assert reg.has("local")
+
+
+def test_load_into_registers_gemini_provider(tmp_path: Path) -> None:
+    ProviderStore(tmp_path).save(
+        ProviderRecord(name="gemini", kind="gemini", api_key="k", default_model="gemini-3-flash")
+    )
+    reg = ProviderRegistry()
+    reg.register("stub", StubProvider())
+    added = load_into(reg, tmp_path)
+    assert added == ["gemini"]
+    assert isinstance(reg.get("gemini"), GeminiProvider)
+
+
+def test_gemini_provider_maps_tools_and_responses() -> None:
+    provider = GeminiProvider(api_key="k")
+    messages = [
+        Message(role="system", content="sys"),
+        Message(role="user", content="list"),
+        Message(
+            role="assistant",
+            tool_calls=[ToolCall(id="call-1", name="list_dir", arguments={"path": "."})],
+        ),
+        Message(role="tool", tool_call_id="call-1", content="README.md"),
+    ]
+    system, contents = provider._to_gemini_contents(messages)
+    assert system == "sys"
+    assert contents[-1]["parts"][0]["functionResponse"]["name"] == "list_dir"
+
+    parsed = provider._parse({
+        "candidates": [{
+            "finishReason": "STOP",
+            "content": {
+                "parts": [
+                    {"text": "hi"},
+                    {"functionCall": {"name": "read_file", "args": {"path": "README.md"}}},
+                ]
+            },
+        }],
+        "usageMetadata": {"promptTokenCount": 2, "candidatesTokenCount": 3},
+    })
+    assert parsed.text == "hi"
+    assert parsed.tool_calls[0].name == "read_file"
+    assert parsed.usage.prompt_tokens == 2
 
 
 # --- subagent manager ----------------------------------------------------
